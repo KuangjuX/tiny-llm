@@ -38,12 +38,12 @@ class RoPE:
                        [: dims // 2].float() / dims)
         t = mx.arange(seq_len)
 
-        freqs = mx.outer(t, freqs).float()
-        freqs_cis = mx.polar(mx.ones_like(freqs), freqs)
+        freqs = mx.outer(t, freqs)
+        freqs_cis = mx.complex(mx.cos(freqs), mx.sin(freqs))
 
         return freqs_cis
 
-    def _compute_repo(self, cos, sin, x):
+    def _compute_rope(self, cos, sin, x):
         """Compute rotary position embedding.
 
         Args:
@@ -67,6 +67,32 @@ class RoPE:
 
         return rx
 
+    def _compute_traditional_rope(self, cos, sin, x) -> mx.array:
+        """Compute traditional rotary position embedding.
+
+        Args:
+            cos: Cosine values.
+            sin: Sine values.
+            x: Input tensor.
+
+        Returns:
+            Tensor with traditional rotary position embedding applied.
+        """
+
+        x1 = x[..., ::2]
+        x2 = x[..., 1::2]
+
+        rx1 = x1 * cos - x2 * sin
+        rx2 = x1 * sin + x2 * cos
+
+        if self.dims < x.shape[-1]:
+            raise NotImplementedError(
+                "Traditional RoPE is not implemented for dims < x.shape[-1]")
+
+        rx = mx.concatenate([rx1[..., None], rx2[..., None]], axis=-1)
+
+        return rx
+
     def __call__(
         self, x: mx.array, offset: list[slice] | slice | None = None
     ) -> mx.array:
@@ -79,7 +105,18 @@ class RoPE:
         Returns:
             Tensor with RoPE applied.
         """
-        x = mx.reshape(x, (x.shape[0], x.shape[1], x.shape[2],
-                           x.shape[3] // 2, 2))
+        # x = mx.reshape(x, (x.shape[0], x.shape[1], x.shape[2],
+        #                    x.shape[3] // 2, 2))
 
-        return x
+        shape = x.shape
+        x = mx.reshape(x, (-1, shape[-2], shape[-1]))
+        N = x.shape[1]
+
+        cos, sin = self._create_cos_sin(self.dims, N, self.base)
+
+        if self.traditional:
+            rx = self._compute_traditional_rope(cos, sin, x)
+        else:
+            rx = self._compute_rope(cos, sin, x)
+
+        return mx.reshape(rx, shape)
