@@ -24,7 +24,22 @@ class Qwen2MultiHeadAttention:
         max_seq_len: int = 32768,
         theta: int = 1000000,
     ):
-        pass
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.wq = wq
+        self.wk = wk
+        self.wv = wv
+        self.wo = wo
+        self.bq = bq
+        self.bk = bk
+        self.bv = bv
+        self.max_seq_len = max_seq_len
+        self.theta = theta
+        # head_dim
+        self.head_dim = hidden_size // num_heads
+        # RoPE编码器
+        self.rope = RoPE(self.head_dim, max_seq_len, base=theta)
 
     def __call__(
         self,
@@ -32,7 +47,62 @@ class Qwen2MultiHeadAttention:
         offset: int,
         mask: mx.array | str | None = None,
     ) -> mx.array:
-        pass
+        # 该方法实现了 Qwen2 的多头注意力前向过程，输入 x 形状为 (B, L, E)
+        # B: batch size, L: 序列长度, E: embedding 维度
+
+        # 1. 解析各维度
+        B, L, E = x.shape
+        H_q = self.num_heads         # query 的 head 数
+        H = self.num_kv_heads        # key/value 的 head 数（可小于 H_q，支持分组注意力）
+        D = self.head_dim            # 每个 head 的维度
+
+        # 2. 线性变换 + bias，得到 q, k, v
+        #   - q: (B, L, H_q * D)
+        #   - k, v: (B, L, H * D)
+        q = linear(x, self.wq, self.bq)
+        k = linear(x, self.wk, self.bk)
+        v = linear(x, self.wv, self.bv)
+
+        # 3. reshape 拆分 head 维度
+        #   - q: (B, L, H_q, D)
+        #   - k, v: (B, L, H, D)
+        q = q.reshape(B, L, H_q, D)
+        k = k.reshape(B, L, H, D)
+        v = v.reshape(B, L, H, D)
+
+        # 4. 对 q, k 应用 RoPE 位置编码
+        #    这里 offset=slice(offset, offset+L) 表示当前 token 在全局序列中的绝对位置
+        #    RoPE 作用后形状不变
+        q = self.rope(q, offset=slice(offset, offset + L))  # (B, L, H_q, D)
+        k = self.rope(k, offset=slice(offset, offset + L))  # (B, L, H, D)
+
+        # 5. 转置 head 和 seq 维度，方便后续 attention
+        #   - q: (B, H_q, L, D)
+        #   - k, v: (B, H, L, D)
+        q = mx.transpose(q, axes=(0, 2, 1, 3))
+        k = mx.transpose(k, axes=(0, 2, 1, 3))
+        v = mx.transpose(v, axes=(0, 2, 1, 3))
+
+        # 6. attention 计算（提升到 float32 精度以保证数值稳定性）
+        #    - scaled_dot_product_attention_grouped 支持分组 attention
+        #    - mask 支持 None/字符串/显式 mask
+        q_fp32 = q.astype(mx.float32)
+        k_fp32 = k.astype(mx.float32)
+        v_fp32 = v.astype(mx.float32)
+        attn_out = scaled_dot_product_attention_grouped(
+            q_fp32, k_fp32, v_fp32, scale=None, mask=mask
+        )  # (B, H_q, L, D)
+        attn_out = attn_out.astype(q.dtype)  # 恢复原始精度
+
+        # 7. 恢复输出 shape
+        #   - 先转回 (B, L, H_q, D)
+        #   - 再合并 head 维度为 (B, L, E)
+        attn_out = mx.transpose(attn_out, axes=(0, 2, 1, 3))  # (B, L, H_q, D)
+        attn_out = attn_out.reshape(B, L, H_q * D)            # (B, L, E)
+
+        # 8. 输出线性投影
+        out = linear(attn_out, self.wo)  # (B, L, E)
+        return out
 
 
 class Qwen2MLP:
