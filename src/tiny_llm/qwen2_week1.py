@@ -106,6 +106,19 @@ class Qwen2MultiHeadAttention:
 
 
 class Qwen2MLP:
+    """
+    Qwen2 MLP 层实现（无 bias 版本）
+
+    结构说明：
+    - 输入: x, shape (..., L, E)
+    - 1. gate 投影: x @ w_gate.T, shape (..., L, I)
+    - 2. up 投影:   x @ w_up.T,   shape (..., L, I)
+    - 3. gate 激活: SiLU(gate_out)
+    - 4. 门控乘法:  silu(gate_out) * up_out, shape (..., L, I)
+    - 5. down 投影: (门控结果) @ w_down.T, shape (..., L, E)
+    - 输出: (..., L, E)
+    """
+
     def __init__(
         self,
         dim: int,
@@ -114,10 +127,39 @@ class Qwen2MLP:
         w_up: mx.array,
         w_down: mx.array,
     ):
-        pass
+        """
+        参数:
+            dim: 输入/输出维度 E
+            hidden_dim: 中间层维度 I
+            w_gate: (I, E)
+            w_up: (I, E)
+            w_down: (E, I)
+        """
+        self.dim = dim
+        self.hidden_dim = hidden_dim
+        self.w_gate = w_gate  # (I, E)
+        self.w_up = w_up      # (I, E)
+        self.w_down = w_down  # (E, I)
 
     def __call__(self, x: mx.array) -> mx.array:
-        pass
+        """
+        前向计算
+        输入:
+            x: (..., L, E)
+        输出:
+            (..., L, E)
+        """
+        # 1. gate 投影: (..., L, I)
+        gate_out = mx.matmul(x, self.w_gate.T)
+        # 2. up 投影: (..., L, I)
+        up_out = mx.matmul(x, self.w_up.T)
+        # 3. SiLU 激活
+        gate_act = gate_out * mx.sigmoid(gate_out)
+        # 4. 门控乘法
+        gated = gate_act * up_out
+        # 5. down 投影: (..., L, E)
+        out = mx.matmul(gated, self.w_down.T)
+        return out
 
 
 class Qwen2TransformerBlock:

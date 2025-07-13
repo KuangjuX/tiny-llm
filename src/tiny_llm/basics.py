@@ -19,4 +19,5 @@ def linear(
 
 
 def silu(x: mx.array) -> mx.array:
-    pass
+    # SiLU(x) = x * sigmoid(x)
+    return x * mx.sigmoid(x)
