@@ -109,6 +109,13 @@ class Qwen2MLP:
     """
     Qwen2 MLP 层实现（无 bias 版本）
 
+    【在 Transformer 里的作用：】
+    - MLP（多层感知机）是 Transformer Block 的核心子层之一，通常位于自注意力（Self-Attention）之后。
+    - 其主要作用是对每个 token 的表示做逐位置的非线性变换和特征提升，增强模型的表达能力。
+    - 具体来说，MLP 通过升维（up projection）、非线性激活、门控机制（Gated Linear Unit, GLU）和降维（down projection）等步骤，帮助模型捕捉更复杂的特征和关系。
+    - 在 Qwen2 这类大模型中，MLP 采用了门控结构（GLU），即用 SiLU 激活后的门控向量对 up 投影结果进行逐元素调制，提升了模型的非线性和建模能力。
+    - 这种结构能有效提升模型性能，是现代 Transformer 架构的标配。
+
     结构说明：
     - 输入: x, shape (..., L, E)
     - 1. gate 投影: x @ w_gate.T, shape (..., L, I)
