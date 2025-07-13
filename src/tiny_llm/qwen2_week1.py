@@ -192,7 +192,45 @@ class Qwen2TransformerBlock:
         max_seq_len: int = 32768,
         theta: int = 1000000,
     ):
-        pass
+        # 保存参数
+        self.num_attention_heads = num_attention_heads
+        self.num_kv_heads = num_kv_heads
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.rms_norm_eps = rms_norm_eps
+        self.max_seq_len = max_seq_len
+        self.theta = theta
+
+        # LayerNorm 权重
+        self.input_layernorm = RMSNorm(
+            hidden_size, w_input_layernorm, eps=rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
+            hidden_size, w_post_attention_layernorm, eps=rms_norm_eps)
+
+        # Attention 权重
+        self.attn = Qwen2MultiHeadAttention(
+            num_attention_heads=num_attention_heads,
+            num_kv_heads=num_kv_heads,
+            hidden_size=hidden_size,
+            wq=wq,
+            wk=wk,
+            wv=wv,
+            wo=wo,
+            bq=bq,
+            bk=bk,
+            bv=bv,
+            max_seq_len=max_seq_len,
+            theta=theta,
+        )
+
+        # MLP 权重
+        self.mlp = Qwen2MLP(
+            hidden_size,
+            intermediate_size,
+            w_gate,
+            w_up,
+            w_down,
+        )
 
     def __call__(
         self,
@@ -200,7 +238,19 @@ class Qwen2TransformerBlock:
         offset: int,
         mask: mx.array | str | None = None,
     ) -> mx.array:
-        pass
+        # 1. input_layernorm
+        normed_x = self.input_layernorm(x)
+        # 2. Attention
+        attn_out = self.attn(normed_x, offset, mask)
+        # 3. 残差 Add
+        x = x + attn_out
+        # 4. post_attention_layernorm
+        normed_x2 = self.post_attention_layernorm(x)
+        # 5. MLP
+        mlp_out = self.mlp(normed_x2)
+        # 6. 残差 Add
+        out = x + mlp_out
+        return out
 
 
 class Qwen2ModelWeek1:
