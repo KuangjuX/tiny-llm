@@ -109,6 +109,13 @@ class Qwen2MLP:
     """
     Qwen2 MLP 层实现（无 bias 版本）
 
+    【在 Transformer 里的作用：】
+    - MLP（多层感知机）是 Transformer Block 的核心子层之一，通常位于自注意力（Self-Attention）之后。
+    - 其主要作用是对每个 token 的表示做逐位置的非线性变换和特征提升，增强模型的表达能力。
+    - 具体来说，MLP 通过升维（up projection）、非线性激活、门控机制（Gated Linear Unit, GLU）和降维（down projection）等步骤，帮助模型捕捉更复杂的特征和关系。
+    - 在 Qwen2 这类大模型中，MLP 采用了门控结构（GLU），即用 SiLU 激活后的门控向量对 up 投影结果进行逐元素调制，提升了模型的非线性和建模能力。
+    - 这种结构能有效提升模型性能，是现代 Transformer 架构的标配。
+
     结构说明：
     - 输入: x, shape (..., L, E)
     - 1. gate 投影: x @ w_gate.T, shape (..., L, I)
@@ -185,7 +192,45 @@ class Qwen2TransformerBlock:
         max_seq_len: int = 32768,
         theta: int = 1000000,
     ):
-        pass
+        # 保存参数
+        self.num_attention_heads = num_attention_heads
+        self.num_kv_heads = num_kv_heads
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.rms_norm_eps = rms_norm_eps
+        self.max_seq_len = max_seq_len
+        self.theta = theta
+
+        # LayerNorm 权重
+        self.input_layernorm = RMSNorm(
+            hidden_size, w_input_layernorm, eps=rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
+            hidden_size, w_post_attention_layernorm, eps=rms_norm_eps)
+
+        # Attention 权重
+        self.attn = Qwen2MultiHeadAttention(
+            hidden_size=hidden_size,
+            num_heads=num_attention_heads,
+            num_kv_heads=num_kv_heads,
+            wq=wq,
+            wk=wk,
+            wv=wv,
+            wo=wo,
+            bq=bq,
+            bk=bk,
+            bv=bv,
+            max_seq_len=max_seq_len,
+            theta=theta,
+        )
+
+        # MLP 权重
+        self.mlp = Qwen2MLP(
+            hidden_size,
+            intermediate_size,
+            w_gate,
+            w_up,
+            w_down,
+        )
 
     def __call__(
         self,
@@ -193,16 +238,99 @@ class Qwen2TransformerBlock:
         offset: int,
         mask: mx.array | str | None = None,
     ) -> mx.array:
-        pass
+        # 1. input_layernorm
+        normed_x = self.input_layernorm(x)
+        # 2. Attention
+        attn_out = self.attn(normed_x, offset, mask)
+        # 3. 残差 Add
+        x = x + attn_out
+        # 4. post_attention_layernorm
+        normed_x2 = self.post_attention_layernorm(x)
+        # 5. MLP
+        mlp_out = self.mlp(normed_x2)
+        # 6. 残差 Add
+        out = x + mlp_out
+        return out
 
 
 class Qwen2ModelWeek1:
     def __init__(self, mlx_model: Any):
-        pass
+        # 从 mlx_model 中提取参数
+        args = mlx_model.args
+        model = mlx_model.model
+
+        self.embed_tokens = Embedding(
+            vocab_size=args.vocab_size,
+            embedding_dim=args.hidden_size,
+            weight=dequantize_linear(model.embed_tokens).astype(mx.float16),
+        )
+        self.layers = []
+        for layer in model.layers:
+            self.layers.append(
+                Qwen2TransformerBlock(
+                    num_attention_heads=args.num_attention_heads,
+                    num_kv_heads=args.num_key_value_heads,
+                    hidden_size=args.hidden_size,
+                    intermediate_size=args.intermediate_size,
+                    rms_norm_eps=args.rms_norm_eps,
+                    wq=dequantize_linear(
+                        layer.self_attn.q_proj).astype(mx.float16),
+                    wk=dequantize_linear(
+                        layer.self_attn.k_proj).astype(mx.float16),
+                    wv=dequantize_linear(
+                        layer.self_attn.v_proj).astype(mx.float16),
+                    wo=dequantize_linear(
+                        layer.self_attn.o_proj).astype(mx.float16),
+                    bq=layer.self_attn.q_proj.bias.astype(mx.float16),
+                    bk=layer.self_attn.k_proj.bias.astype(mx.float16),
+                    bv=layer.self_attn.v_proj.bias.astype(mx.float16),
+                    w_gate=dequantize_linear(
+                        layer.mlp.gate_proj).astype(mx.float16),
+                    w_up=dequantize_linear(
+                        layer.mlp.up_proj).astype(mx.float16),
+                    w_down=dequantize_linear(
+                        layer.mlp.down_proj).astype(mx.float16),
+                    w_input_layernorm=layer.input_layernorm.weight.astype(
+                        mx.float16),
+                    w_post_attention_layernorm=layer.post_attention_layernorm.weight.astype(
+                        mx.float16),
+                    max_seq_len=args.max_position_embeddings,
+                    theta=args.rope_theta,
+                )
+            )
+        self.norm = RMSNorm(
+            args.hidden_size,
+            model.norm.weight.astype(mx.float16),
+            eps=args.rms_norm_eps,
+        )
+        # 根据 tie_word_embeddings 决定是否使用独立的 lm_head
+        if not args.tie_word_embeddings:
+            self.lm_head = dequantize_linear(
+                mlx_model.lm_head).astype(mx.float16)
+        else:
+            self.lm_head = None
 
     def __call__(
         self,
         inputs: mx.array,
         offset: int,
     ) -> mx.array:
-        pass
+        # 1. 词嵌入
+        x = self.embed_tokens(inputs)
+
+        # 2. 依次通过每个 transformer block
+        for layer in self.layers:
+            # 序列长度大于 1 时使用 causal mask
+            mask = "causal" if x.shape[1] > 1 else None
+            x = layer(x, offset, mask)
+
+        # 3. 最后的 LayerNorm
+        x = self.norm(x)
+
+        # 4. 输出线性投影到词表大小
+        if self.lm_head is not None:
+            x = linear(x, self.lm_head)
+        else:
+            x = self.embed_tokens.as_linear(x)
+
+        return x
